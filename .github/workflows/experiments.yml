@@ -1,0 +1,127 @@
+name: devproven-experiments
+
+# Reusable workflow used only to probe limits. Not part of the proposed design.
+
+on:
+  workflow_call:
+    inputs:
+      note:
+        type: string
+        default: ""
+    secrets:
+      DECLARED_SECRET:
+        required: false
+
+permissions: {}
+
+jobs:
+  aud-limits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - name: Audience length and character probes
+        run: |
+          node - <<'EOF'
+          const base = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, bearer = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+          const probe = async (label, aud, raw) => {
+            const url = base + (aud === null ? '' : '&audience=' + (raw ? aud : encodeURIComponent(aud)));
+            let line;
+            try {
+              const r = await fetch(url, { headers: { Authorization: 'bearer ' + bearer } });
+              const text = await r.text();
+              if (!r.ok) line = `http=${r.status} body=${JSON.stringify(text.slice(0, 200))}`;
+              else {
+                const tok = JSON.parse(text).value;
+                const c = JSON.parse(Buffer.from(tok.split('.')[1], 'base64url'));
+                const same = aud === null ? 'n/a' : (c.aud === aud);
+                line = `http=200 aud_len=${String(c.aud).length} roundtrip_equal=${same} token_len=${tok.length} aud=${JSON.stringify(String(c.aud).slice(0, 80))}`;
+              }
+            } catch (e) { line = `error=${e.message} cause=${e.cause && e.cause.code}`; }
+            console.log(`AUD ${label}: ${line}`);
+          };
+          (async () => {
+            await probe('default(no audience param)', null);
+            await probe('empty', '');
+            for (const n of [1, 64, 71, 255, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]) await probe(`len=${n}`, 'a'.repeat(n));
+            await probe('sha256-binding', 'devproven:sha256:' + 'ab'.repeat(32));
+            await probe('space', 'a b');
+            await probe('url', 'https://devproven.com/verify?x=1&y=2#frag');
+            await probe('punct', `!"#$%&'()*+,-./:;<=>?@[\\]^_\`{|}~`);
+            await probe('unicode', 'äö€😀漢');
+            await probe('newline-tab', 'a\nb\tc');
+            await probe('nul', 'a\u0000b');
+            await probe('json-ish', '{"aud":["x","y"]}');
+            await probe('raw-unencoded-plus', 'a+b', true);
+            await probe('raw-percent', 'a%2Fb', true);
+            await probe('two-params', 'first&audience=second', true);
+          })();
+          EOF
+
+  caller-influence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      INPUT_NOTE: ${{ inputs.note }}
+      VARS_TEST: ${{ vars.DEVPROVEN_TEST }}
+      DECLARED_SECRET_SET: ${{ secrets.DECLARED_SECRET != '' }}
+      UNDECLARED_SECRET_SET: ${{ secrets.UNDECLARED_SECRET != '' }}
+      EVENT_INPUTS: ${{ toJSON(github.event.inputs) }}
+      CTX_EVENT_NAME: ${{ github.event_name }}
+      CTX_WORKFLOW: ${{ github.workflow }}
+      CTX_WORKFLOW_REF: ${{ github.workflow_ref }}
+      CTX_JOB: ${{ github.job }}
+    steps:
+      - name: What reaches the called workflow from the caller
+        run: |
+          echo "INFLUENCE inputs.note=[$INPUT_NOTE]"
+          echo "INFLUENCE vars.DEVPROVEN_TEST=[$VARS_TEST]"
+          echo "INFLUENCE declared secret set=$DECLARED_SECRET_SET undeclared secret set=$UNDECLARED_SECRET_SET"
+          echo "INFLUENCE github.event.inputs=$EVENT_INPUTS"
+          echo "INFLUENCE caller job-level env CALLER_JOB_ENV=[${CALLER_JOB_ENV:-<unset>}]"
+          echo "INFLUENCE github.event_name=$CTX_EVENT_NAME github.workflow=$CTX_WORKFLOW github.workflow_ref=$CTX_WORKFLOW_REF github.job=$CTX_JOB"
+          echo "INFLUENCE runner name=$RUNNER_NAME environment=${RUNNER_ENVIRONMENT:-<unset>} os=$RUNNER_OS"
+          echo "INFLUENCE ACTIONS_STEP_DEBUG=[${ACTIONS_STEP_DEBUG:-<unset>}] RUNNER_DEBUG=[${RUNNER_DEBUG:-<unset>}]"
+
+  activity-metadata-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: GET /activity with permissions {}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          code=$(curl -sS -o body.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/activity?per_page=5")
+          echo "ACTIVITY-NOPERM http=$code entries=$(node -e 'try{const j=JSON.parse(require("fs").readFileSync("body.json","utf8"));console.log(Array.isArray(j)?j.length:"msg:"+j.message)}catch(e){console.log("unparsable")}')"
+          code=$(curl -sS -o body2.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO")
+          echo "REPO-NOPERM http=$code"
+
+  activity-contents-read:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: GET /activity with contents read, paginated at 2 per page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          node - <<'EOF'
+          (async () => {
+            let url = `https://api.github.com/repos/${process.env.REPO}/activity?per_page=2`, pages = 0, n = 0, status;
+            while (url && pages < 50) {
+              const r = await fetch(url, { headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' } });
+              status = r.status; pages++;
+              if (!r.ok) { console.log(`ACTIVITY-READ http=${status} body=${(await r.text()).slice(0, 200)}`); return; }
+              n += (await r.json()).length;
+              const m = (r.headers.get('link') || '').match(/<([^>]+)>;\s*rel="next"/);
+              url = m ? m[1] : null;
+            }
+            console.log(`ACTIVITY-READ http=${status} pages=${pages} entries=${n} more=${!!url}`);
+          })();
+          EOF
