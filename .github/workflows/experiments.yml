@@ -80,6 +80,7 @@ jobs:
           echo "INFLUENCE vars.DEVPROVEN_TEST=[$VARS_TEST]"
           echo "INFLUENCE declared secret set=$DECLARED_SECRET_SET undeclared secret set=$UNDECLARED_SECRET_SET"
           echo "INFLUENCE github.event.inputs=$EVENT_INPUTS"
+          echo "INFLUENCE caller workflow-level env CALLER_ENV=[${CALLER_ENV:-<unset>}]"
           echo "INFLUENCE caller job-level env CALLER_JOB_ENV=[${CALLER_JOB_ENV:-<unset>}]"
           echo "INFLUENCE github.event_name=$CTX_EVENT_NAME github.workflow=$CTX_WORKFLOW github.workflow_ref=$CTX_WORKFLOW_REF github.job=$CTX_JOB"
           echo "INFLUENCE runner name=$RUNNER_NAME environment=${RUNNER_ENVIRONMENT:-<unset>} os=$RUNNER_OS"
